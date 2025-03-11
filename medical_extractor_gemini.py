@@ -6,7 +6,8 @@ from langchain.schema import Document
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from dotenv import load_dotenv
-
+import time  # ✅ Add delay between API calls
+import re
 # ✅ Load environment variables from .env
 load_dotenv()
 
@@ -25,33 +26,45 @@ class MedicalGlossaryExtractor:
         self.pdf_path = pdf_path
         self.persist_directory = persist_directory
 
-        # Load extracted glossary terms
+        # ✅ Extract glossary terms properly
         self.medical_glossary = self._extract_medical_glossary()
-        self.glossary_terms = set(term.lower() for term in self.medical_glossary.split("\n") if term.strip())
 
-        # Initialize vector store
+        # ✅ Extract only keys (terms) instead of using `.split("\n")`
+        self.glossary_terms = set(self.medical_glossary.keys())
+
+        # ✅ Initialize vector store
         self.vector_store = self._load_or_create_vector_store()
 
-    def _extract_medical_glossary(self) -> str:
-        """Extracts medical terms from a PDF glossary using LangChain's PyPDFLoader."""
+
+
+    def _extract_medical_glossary(self) -> dict:
+        """Extracts medical terms and definitions from the PDF glossary."""
         loader = PyPDFLoader(self.pdf_path)
         pages = loader.load()
-        
-        # Extract text from each page
+
+        # ✅ Extract text from each page
         glossary_text = [page.page_content for page in pages]
-        return "\n".join(glossary_text)
+        full_text = "\n".join(glossary_text)
+
+        # ✅ Use regex to extract terms and definitions in "term - definition" format
+        pattern = r"([A-Za-z\s\-]+)-\s*([A-Za-z\s\(\)0-9,]+)"
+        matches = re.findall(pattern, full_text)
+
+        # ✅ Store terms as a dictionary
+        glossary_dict = {term.strip(): definition.strip() for term, definition in matches}
+        
+        return glossary_dict  # ✅ Returns structured {term: definition} data
+
     
     def _load_or_create_vector_store(self):
         """Loads or creates a vector store for medical glossary terms using GoogleAIEmbeddings."""
         
         embedding_function = GoogleGenerativeAIEmbeddings(
-            model="models/embedding-001", google_api_key=api_key  # ✅ Correct API Key
+            model="models/embedding-001", google_api_key=api_key
         )
 
-        # ✅ Define a collection name (important for managing stored data)
         collection_name = "medical_glossary"
 
-        # ✅ If the vector store exists, load it
         if os.path.exists(self.persist_directory):
             return Chroma(
                 collection_name=collection_name,
@@ -59,15 +72,13 @@ class MedicalGlossaryExtractor:
                 persist_directory=self.persist_directory
             )
 
-        # ✅ Split text into chunks
-        text_splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-        chunks = text_splitter.split_text(self.medical_glossary)
-        docs = [Document(page_content=chunk) for chunk in chunks]
+        # ✅ Use each term + definition as its own chunk
+        docs = [Document(page_content=f"{term}: {definition}") for term, definition in self.medical_glossary.items()]
 
         if not docs:
             raise ValueError("No medical terms found! Check PDF extraction or chunking parameters.")
 
-        # ✅ Correctly initialize Chroma with `collection_name`
+        # ✅ Correctly initialize Chroma
         vector_store = Chroma.from_documents(
             documents=docs,
             embedding=embedding_function,
@@ -76,6 +87,7 @@ class MedicalGlossaryExtractor:
         )
 
         return vector_store
+
 
     def extract_medical_terms(self, input_text: str):
         """Extracts medical terms using Gemini 1.5 Flash."""
@@ -117,6 +129,7 @@ class MedicalGlossaryExtractor:
 
         return response.text if response else "No medical terms detected."
     
+    
     def map_to_ontology(self, extracted_terms):
         """Maps extracted medical terms to ontologies using Gemini 1.5 Flash."""
         if not extracted_terms:
@@ -139,12 +152,19 @@ class MedicalGlossaryExtractor:
             - "Definition"
             """
 
-            model = genai.GenerativeModel("gemini-1.5-flash")
-            response = model.generate_content(prompt)
+            try:
+                model = genai.GenerativeModel("gemini-1.5-flash")
+                response = model.generate_content(prompt)
 
-            ontology_mappings[term] = response.text if response else "No mapping found."
+                # ✅ Ensure valid JSON output
+                ontology_mappings[term] = json.loads(response.text)
+                print(f"ontology_mappings[{term}] = ", response.text)
+
+            except Exception as e:
+                ontology_mappings[term] = {"error": "API Error"}
 
         return ontology_mappings
+
     
 if __name__ == "__main__":
     pdf_file = "159358_AMAGlossaryofMedicalTerms_Ver1.0.pdf"
